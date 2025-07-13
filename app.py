@@ -5,8 +5,82 @@ import pandas as pd
 from streamlit_calendar import calendar as calendar_component
 from fpdf import FPDF
 import io
+import os
+import firebase_admin
+from firebase_admin import credentials, db, firestore
+import base64
 
 st.set_page_config(page_title="Painel para Advogados", layout="wide")
+
+
+# Firebase setup
+def init_firebase():
+    if "firebase_ready" in st.session_state:
+        return
+    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    db_url = os.getenv("FIREBASE_DATABASE_URL")
+    if cred_path and db_url:
+        cred = credentials.Certificate(cred_path)
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred, {"databaseURL": db_url})
+        st.session_state.firestore_db = firestore.client()
+        st.session_state.firebase_ready = True
+    else:
+        st.session_state.firebase_ready = False
+
+
+def load_firebase_data():
+    if not st.session_state.get("firebase_ready") or st.session_state.get("firebase_loaded"):
+        return
+
+    def load_list(path):
+        snap = db.reference(path).get()
+        if isinstance(snap, dict):
+            return [dict(v, id=k) for k, v in snap.items()]
+        return []
+
+    st.session_state.clients = load_list("clients")
+    st.session_state.cases = load_list("cases")
+    st.session_state.tasks = load_list("tasks")
+    st.session_state.events = load_list("events")
+    st.session_state.transactions = load_list("transactions")
+    docs = st.session_state.firestore_db.collection("documents").stream()
+    st.session_state.documents = [dict(d.to_dict(), id=d.id) for d in docs]
+    st.session_state.firebase_loaded = True
+
+
+def save_realtime(path, data, key=None):
+    if not st.session_state.get("firebase_ready"):
+        return key
+    if key:
+        db.reference(f"{path}/{key}").set(data)
+        return key
+    ref = db.reference(path).push(data)
+    return ref.key
+
+
+def delete_realtime(path, key):
+    if st.session_state.get("firebase_ready") and key:
+        db.reference(f"{path}/{key}").delete()
+
+
+def save_firestore(collection, data, doc_id=None):
+    if not st.session_state.get("firebase_ready"):
+        return doc_id
+    if doc_id:
+        st.session_state.firestore_db.collection(collection).document(doc_id).set(data)
+        return doc_id
+    doc_ref = st.session_state.firestore_db.collection(collection).add(data)[1]
+    return doc_ref.id
+
+
+def delete_firestore(collection, doc_id):
+    if st.session_state.get("firebase_ready") and doc_id:
+        st.session_state.firestore_db.collection(collection).document(doc_id).delete()
+
+
+init_firebase()
+load_firebase_data()
 
 
 # Compatibilidade para diferentes versões do Streamlit
@@ -104,84 +178,92 @@ def dataframe_to_pdf(df: pd.DataFrame, title: str) -> bytes:
 
 
 def add_client(name, email, phone, notes):
-    st.session_state.clients.append(
-        {
-            "Nome": name,
-            "Email": email,
-            "Telefone": phone,
-            "Anotações": notes,
-        }
-    )
+    entry = {
+        "Nome": name,
+        "Email": email,
+        "Telefone": phone,
+        "Anotações": notes,
+    }
+    key = save_realtime("clients", entry)
+    entry["id"] = key
+    st.session_state.clients.append(entry)
 
 
 def add_case(client, process_number, parties, lawyer, start_date, status):
-    st.session_state.cases.append(
-        {
-            "Cliente": client,
-            "Processo": process_number,
-            "Partes": parties,
-            "Advogado": lawyer,
-            "Data de Abertura": start_date,
-            "Status": status,
-        }
-    )
+    entry = {
+        "Cliente": client,
+        "Processo": process_number,
+        "Partes": parties,
+        "Advogado": lawyer,
+        "Data de Abertura": start_date,
+        "Status": status,
+    }
+    key = save_realtime("cases", entry)
+    entry["id"] = key
+    st.session_state.cases.append(entry)
 
 
 def add_task(description, priority, due_date, client, related_case):
-    st.session_state.tasks.append(
-        {
-            "Descrição": description,
-            "Prioridade": priority,
-            "Prazo": due_date,
-            "Cliente": client,
-            "Caso": related_case,
-        }
-    )
+    entry = {
+        "Descrição": description,
+        "Prioridade": priority,
+        "Prazo": due_date,
+        "Cliente": client,
+        "Caso": related_case,
+    }
+    key = save_realtime("tasks", entry)
+    entry["id"] = key
+    st.session_state.tasks.append(entry)
 
 
 def add_event(
     title, event_type, event_datetime, location, client, case, status, description
 ):
-    st.session_state.events.append(
-        {
-            "Título": title,
-            "Tipo": event_type,
-            "Data": event_datetime,
-            "Local": location,
-            "Cliente": client,
-            "Caso": case,
-            "Status": status,
-            "Descrição": description,
-        }
-    )
+    entry = {
+        "Título": title,
+        "Tipo": event_type,
+        "Data": event_datetime,
+        "Local": location,
+        "Cliente": client,
+        "Caso": case,
+        "Status": status,
+        "Descrição": description,
+    }
+    key = save_realtime("events", entry)
+    entry["id"] = key
+    st.session_state.events.append(entry)
 
 
 def add_transaction(
     kind, category, amount, description, trans_date, payment_status, client, case
 ):
-    st.session_state.transactions.append(
-        {
-            "Tipo": kind,
-            "Categoria": category,
-            "Valor": amount,
-            "Descrição": description,
-            "Data": trans_date,
-            "Status": payment_status,
-            "Cliente": client,
-            "Caso": case,
-        }
-    )
+    entry = {
+        "Tipo": kind,
+        "Categoria": category,
+        "Valor": amount,
+        "Descrição": description,
+        "Data": trans_date,
+        "Status": payment_status,
+        "Cliente": client,
+        "Caso": case,
+    }
+    key = save_realtime("transactions", entry)
+    entry["id"] = key
+    st.session_state.transactions.append(entry)
 
 
 def add_document(client, case, title, file):
-    st.session_state.documents.append(
-        {
-            "Cliente": client,
-            "Caso": case,
-            "Título": title,
-            "Arquivo": file.name if file else "",
-        }
-    )
+    entry = {
+        "Cliente": client,
+        "Caso": case,
+        "Título": title,
+        "Arquivo": file.name if file else "",
+    }
+    if file is not None:
+        entry["Conteudo"] = base64.b64encode(file.getvalue()).decode("utf-8")
+    doc_id = save_firestore("documents", entry)
+    entry["id"] = doc_id
+    st.session_state.documents.append(entry)
 
 
 # Dialogs for data entry
@@ -368,12 +450,16 @@ def dialog_edit_client(idx: int):
     phone = st.text_input("Telefone", value=c["Telefone"])
     notes = st.text_area("Anotações / Preferências", value=c["Anotações"])
     if st.button("Salvar"):
-        st.session_state.clients[idx] = {
+        updated = {
             "Nome": name,
             "Email": email,
             "Telefone": phone,
             "Anotações": notes,
         }
+        key = c.get("id")
+        save_realtime("clients", updated, key)
+        updated["id"] = key
+        st.session_state.clients[idx] = updated
         st.session_state.edit_client_idx = None
         st.success("Cliente atualizado")
         rerun()
@@ -393,7 +479,7 @@ def dialog_edit_case(idx: int):
         index=["Ativo", "Encerrado", "Suspenso"].index(c["Status"]),
     )
     if st.button("Salvar"):
-        st.session_state.cases[idx] = {
+        updated = {
             "Cliente": client,
             "Processo": process_number,
             "Partes": parties,
@@ -401,6 +487,10 @@ def dialog_edit_case(idx: int):
             "Data de Abertura": start_date,
             "Status": status,
         }
+        key = c.get("id")
+        save_realtime("cases", updated, key)
+        updated["id"] = key
+        st.session_state.cases[idx] = updated
         st.session_state.edit_case_idx = None
         st.success("Caso atualizado")
         rerun()
@@ -413,12 +503,17 @@ def dialog_edit_document(idx: int):
     case = st.text_input("Caso", value=d["Caso"] or "")
     title = st.text_input("Título / Descrição *", value=d["Título"])
     if st.button("Salvar"):
-        st.session_state.documents[idx] = {
+        updated = {
             "Cliente": client,
             "Caso": case if case else None,
             "Título": title,
             "Arquivo": d.get("Arquivo", ""),
+            "Conteudo": d.get("Conteudo", ""),
         }
+        doc_id = d.get("id")
+        save_firestore("documents", updated, doc_id)
+        updated["id"] = doc_id
+        st.session_state.documents[idx] = updated
         st.session_state.edit_document_idx = None
         st.success("Documento atualizado")
         rerun()
@@ -446,7 +541,7 @@ def dialog_edit_event(idx: int):
     description = st.text_area("Descrição", value=ev["Descrição"])
     if st.button("Salvar"):
         dt = datetime.combine(event_day, event_time)
-        st.session_state.events[idx] = {
+        updated = {
             "Título": title,
             "Tipo": event_type,
             "Data": dt,
@@ -456,6 +551,10 @@ def dialog_edit_event(idx: int):
             "Status": status,
             "Descrição": description,
         }
+        key = ev.get("id")
+        save_realtime("events", updated, key)
+        updated["id"] = key
+        st.session_state.events[idx] = updated
         st.session_state.edit_event_idx = None
         st.success("Evento atualizado")
         rerun()
@@ -474,13 +573,17 @@ def dialog_edit_task(idx: int):
     client = st.text_input("Cliente", value=t["Cliente"] or "")
     related_case = st.text_input("Caso", value=t["Caso"] or "")
     if st.button("Salvar"):
-        st.session_state.tasks[idx] = {
+        updated = {
             "Descrição": description,
             "Prioridade": priority,
             "Prazo": due_date,
             "Cliente": client if client else None,
             "Caso": related_case if related_case else None,
         }
+        key = t.get("id")
+        save_realtime("tasks", updated, key)
+        updated["id"] = key
+        st.session_state.tasks[idx] = updated
         st.session_state.edit_task_idx = None
         st.success("Tarefa atualizada")
         rerun()
@@ -574,7 +677,8 @@ elif menu == "Clientes":
                 st.session_state.edit_client_idx = idx
                 rerun()
             if col2.button("Excluir", key=f"del_client_{idx}"):
-                del st.session_state.clients[idx]
+                entry = st.session_state.clients.pop(idx)
+                delete_realtime("clients", entry.get("id"))
                 rerun()
     else:
         st.info("Nenhum cliente cadastrado")
@@ -629,7 +733,8 @@ elif menu == "Casos":
                 st.session_state.edit_case_idx = orig
                 rerun()
             if col2.button("Excluir", key=f"del_case_{orig}"):
-                del st.session_state.cases[orig]
+                entry = st.session_state.cases.pop(orig)
+                delete_realtime("cases", entry.get("id"))
                 rerun()
     else:
         st.info("Nenhum caso cadastrado")
@@ -663,7 +768,8 @@ elif menu == "Documentos":
                 st.session_state.edit_document_idx = orig
                 rerun()
             if col2.button("Excluir", key=f"del_doc_{orig}"):
-                del st.session_state.documents[orig]
+                entry = st.session_state.documents.pop(orig)
+                delete_firestore("documents", entry.get("id"))
                 rerun()
     else:
         st.info("Nenhum documento anexado")
@@ -709,7 +815,8 @@ elif menu == "Agenda":
                 st.session_state.edit_event_idx = orig
                 rerun()
             if col2.button("Excluir", key=f"del_event_{orig}"):
-                del st.session_state.events[orig]
+                entry = st.session_state.events.pop(orig)
+                delete_realtime("events", entry.get("id"))
                 rerun()
     else:
         st.info("Nenhum evento cadastrado")
@@ -757,7 +864,8 @@ elif menu == "Tarefas":
                 st.session_state.edit_task_idx = orig
                 rerun()
             if col2.button("Excluir", key=f"del_task_{orig}"):
-                del st.session_state.tasks[orig]
+                entry = st.session_state.tasks.pop(orig)
+                delete_realtime("tasks", entry.get("id"))
                 rerun()
     else:
         st.info("Nenhuma tarefa cadastrada")
